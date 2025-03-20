@@ -4,9 +4,9 @@
 
 ## 🚀 Функционал:
 ✅ **Парсер расписания** (Selenium) — `scraper.py`  
+✅ **База данных** (SQLite) — `mai_schedule.db`  
 ✅ **Фильтрация аудиторий** (IT-кабинеты) — `filter_db.py`  
 ✅ **API (Flask)** — `api.py`  
-✅ **База данных** (SQLite) — `mai_schedule.db`  
 🔳 **Интеграция с Google Calendar**  
 🔳 **Уведомления преподавателей**  
 🔳 **Веб-интерфейс**  
