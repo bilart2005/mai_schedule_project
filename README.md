@@ -27,7 +27,7 @@ cd mai_schedule_project
 pip install -r requirements.txt
 ```
 
-📄 Документация:
+📄 Документация:  
 📂 Бизнес-требования: docs/Business Requirements.docx  
 📂 Спецификация (SRS): docs/System Requirements.docx  
 
