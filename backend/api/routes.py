@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
-import sqlite3
 from database import create_tables, query_db, execute_db
 from google_sync import sync_group_to_calendar
 
@@ -10,22 +9,21 @@ app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = "super-secret"  # Замените на свой ключ
 jwt = JWTManager(app)
 
-# 🛠 Создаём таблицы в БД, если их нет
+# Создаем таблицы в БД (учтите, что в create_tables должны быть добавлены новые поля)
 create_tables()
 
 
-### ---------- АВТОРИЗАЦИЯ И РОЛИ ---------- ###
+### ---------- АВТОРИЗАЦИЯ ---------- ###
 @app.route("/register", methods=["POST"])
 def register_user():
     """
     🔐 Регистрация пользователя.
-    Входные данные: {"email": "...", "password": "...", "role": "..."}
-    role может быть "student", "teacher", "admin"
+    Входные данные: {"email": "...", "password": "...", "role": "..."}. По умолчанию role="student".
     """
     data = request.json
     email = data.get("email")
     password = data.get("password")
-    role = data.get("role", "student")  # По умолчанию студент
+    role = data.get("role", "student")
 
     execute_db(
         "INSERT INTO users (email, password, role) VALUES (?, ?, ?)",
@@ -38,7 +36,7 @@ def register_user():
 def login_user():
     """
     🔑 Вход пользователя (JWT-авторизация).
-    Входные данные: {"email": "...", "password": "..."}
+    Входные данные: {"email": "...", "password": "..."}.
     """
     data = request.json
     email = data.get("email")
@@ -59,7 +57,7 @@ def login_user():
     return jsonify(access_token=access_token), 200
 
 
-### ---------- РАСПИСАНИЕ ---------- ###
+### ---------- ГРУППЫ ---------- ###
 @app.route("/groups", methods=["GET"])
 def get_groups():
     """📋 Возвращает список всех групп."""
@@ -67,6 +65,7 @@ def get_groups():
     return jsonify([g[0] for g in groups])
 
 
+### ---------- РАСПИСАНИЕ ---------- ###
 @app.route("/schedule", methods=["GET"])
 def get_schedule():
     """
@@ -80,23 +79,46 @@ def get_schedule():
 
     rows = query_db(
         """
-        SELECT day, time, room, subject, teacher
+        SELECT id, day, start_time, end_time, subject, teacher, room, event_type, recurrence_pattern, is_custom
         FROM schedule
         WHERE group_name = ? AND week = ?
         """,
         (group, week)
     )
-    return jsonify([
-        {"day": row[0], "time": row[1], "room": row[2], "subject": row[3], "teacher": row[4] or "Не указан"}
+    schedule = [
+        {
+            "id": row[0],
+            "day": row[1],
+            "start_time": row[2],
+            "end_time": row[3],
+            "subject": row[4],
+            "teacher": row[5] if row[5] else "Не указан",
+            "room": row[6] if row[6] else "Не указана",
+            "event_type": row[7],
+            "recurrence_pattern": row[8],
+            "is_custom": bool(row[9])
+        }
         for row in rows
-    ])
+    ]
+    return jsonify(schedule)
 
 
 @app.route("/schedule", methods=["POST"])
 @jwt_required()
 def add_schedule():
     """
-    ➕ Добавляет новое занятие (только преподаватели и админы).
+    ➕ Добавляет новое занятие (только для преподавателей и администраторов).
+    Ожидаемые поля JSON:
+      - group_name: название группы
+      - week: неделя
+      - day: день
+      - start_time: время начала занятия (например, "09:00")
+      - end_time: время окончания занятия (например, "10:30")
+      - subject: предмет
+      - teacher: преподаватель (по умолчанию "Не указан")
+      - room: аудитория (по умолчанию "Не указана")
+      - event_type: тип события ("разовое" или "повторяющееся", по умолчанию "разовое")
+      - recurrence_pattern: режим повторяемости (например, "каждую неделю" или "по верхней/нижней", по умолчанию пустая строка)
     """
     current_user = get_jwt_identity()
     role = current_user["role"]
@@ -106,11 +128,24 @@ def add_schedule():
     data = request.json
     execute_db(
         """
-        INSERT INTO schedule (week, day, time, room, subject, teacher, group_name, is_custom)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO schedule (
+            group_name, week, day, start_time, end_time, subject, teacher, room, event_type, recurrence_pattern, is_custom
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (data["week"], data["day"], data["time"], data["room"], data["subject"],
-         data.get("teacher", "Не указан"), data.get("group_name", ""), 1 if role == "teacher" else 0)
+        (
+            data.get("group_name", ""),
+            data["week"],
+            data["day"],
+            data["start_time"],
+            data["end_time"],
+            data["subject"],
+            data.get("teacher", "Не указан"),
+            data.get("room", "Не указана"),
+            data.get("event_type", "разовое"),
+            data.get("recurrence_pattern", ""),
+            1  # При ручном добавлении выставляем флаг is_custom
+        )
     )
     return jsonify({"msg": "Занятие добавлено"}), 201
 
@@ -119,7 +154,8 @@ def add_schedule():
 @jwt_required()
 def update_schedule(schedule_id):
     """
-    ✏️ Обновляет существующее занятие (например, изменяет время/аудиторию).
+    ✏️ Обновляет существующее занятие (изменение времени, аудитории, преподавателя, типа события и т.д.).
+    Поддерживаются обновления следующих полей: group_name, week, day, start_time, end_time, subject, teacher, room, event_type, recurrence_pattern.
     """
     current_user = get_jwt_identity()
     role = current_user["role"]
@@ -130,7 +166,8 @@ def update_schedule(schedule_id):
     fields = []
     values = []
 
-    for key in ["week", "day", "time", "room", "subject", "teacher", "group_name"]:
+    for key in ["group_name", "week", "day", "start_time", "end_time", "subject", "teacher", "room", "event_type",
+                "recurrence_pattern"]:
         if key in data:
             fields.append(f"{key} = ?")
             values.append(data[key])
@@ -146,7 +183,9 @@ def update_schedule(schedule_id):
 @app.route("/schedule/<int:schedule_id>", methods=["DELETE"])
 @jwt_required()
 def delete_schedule(schedule_id):
-    """🗑 Удаляет занятие (teacher/admin)."""
+    """
+    🗑 Удаляет занятие по его идентификатору.
+    """
     current_user = get_jwt_identity()
     role = current_user["role"]
     if role not in ["teacher", "admin"]:
@@ -159,31 +198,52 @@ def delete_schedule(schedule_id):
 ### ---------- АУДИТОРИИ ---------- ###
 @app.route("/occupied_rooms", methods=["GET"])
 def get_occupied_rooms():
-    """📌 Возвращает список занятых IT-кабинетов."""
-    rooms = query_db("SELECT week, day, time, room, subject, teacher, group_name FROM occupied_rooms")
+    """
+    📌 Возвращает список занятых IT-кабинетов.
+    Ожидается, что таблица occupied_rooms содержит поля: week, day, start_time, end_time, room, subject, teacher, group_name.
+    """
+    rows = query_db("SELECT week, day, start_time, end_time, room, subject, teacher, group_name FROM occupied_rooms")
     return jsonify([
-        {"week": row[0], "day": row[1], "time": row[2], "room": row[3], "subject": row[4], "teacher": row[5],
-         "group": row[6]}
-        for row in rooms
+        {
+            "week": row[0],
+            "day": row[1],
+            "start_time": row[2],
+            "end_time": row[3],
+            "room": row[4],
+            "subject": row[5],
+            "teacher": row[6],
+            "group": row[7]
+        }
+        for row in rows
     ])
 
 
 @app.route("/free_rooms", methods=["GET"])
 def get_free_rooms():
-    """✅ Возвращает список свободных IT-кабинетов."""
-    rooms = query_db("SELECT week, day, time, room FROM free_rooms")
+    """
+    ✅ Возвращает список свободных IT-кабинетов.
+    Ожидается, что таблица free_rooms содержит поля: week, day, start_time, end_time, room.
+    """
+    rows = query_db("SELECT week, day, start_time, end_time, room FROM free_rooms")
     return jsonify([
-        {"week": row[0], "day": row[1], "time": row[2], "room": row[3]}
-        for row in rooms
+        {
+            "week": row[0],
+            "day": row[1],
+            "start_time": row[2],
+            "end_time": row[3],
+            "room": row[4]
+        }
+        for row in rows
     ])
 
 
-### ---------- GOOGLE CALENDAR ---------- ###
+### ---------- GOOGLE CALENDAR СИНХРОНИЗАЦИЯ ---------- ###
 @app.route("/calendar/sync_group", methods=["POST"])
 @jwt_required()
 def sync_group_calendar():
     """
-    🔄 Синхронизирует расписание всей группы с Google Calendar.
+    🔄 Синхронизирует расписание указанной группы с Google Calendar.
+    Входные данные: {"group": "название группы"}
     """
     data = request.json
     group = data.get("group")
@@ -197,4 +257,3 @@ def sync_group_calendar():
 ### ---------- ЗАПУСК СЕРВЕРА ---------- ###
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
-
