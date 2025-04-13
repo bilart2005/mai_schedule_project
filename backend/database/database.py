@@ -2,6 +2,9 @@ import sqlite3
 
 DB_PATH = "mai_schedule.db"
 
+def get_db_connection():
+    return sqlite3.connect(DB_PATH)
+
 def create_tables():
     """Создает таблицы в БД, если их нет, с расширенной схемой для расписания."""
     conn = sqlite3.connect(DB_PATH)
@@ -143,3 +146,18 @@ def execute_db(query, args=()):
 
 # При импортировании этого файла автоматически создаются таблицы.
 create_tables()
+def create_changes_log_table():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS changes_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schedule_id INTEGER,
+            change_type TEXT CHECK(change_type IN ('create', 'update', 'delete')),
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    conn.close()

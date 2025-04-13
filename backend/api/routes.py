@@ -150,6 +150,8 @@ def add_schedule():
         )
     )
     return jsonify({"msg": "Занятие добавлено"}), 201
+    conn.execute("INSERT INTO changes_log (schedule_id, change_type) VALUES (?, 'create')\", (new_schedule_id,))
+    conn.commit()
 
 
 @app.route("/schedule/<int:schedule_id>", methods=["PUT"])
