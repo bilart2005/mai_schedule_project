@@ -2,8 +2,10 @@ import sqlite3
 
 DB_PATH = "mai_schedule.db"
 
+
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
+
 
 def create_tables():
     """Создает таблицы в БД, если их нет, с расширенной схемой для расписания."""
@@ -112,7 +114,7 @@ def save_schedule(group_name, schedule):
             lesson["subject"],
             lesson["teacher"],
             lesson["room"],
-            "разовое",   # По умолчанию для данных с сайта
+            "разовое",  # По умолчанию для данных с сайта
             ""
         ))
 
@@ -146,6 +148,8 @@ def execute_db(query, args=()):
 
 # При импортировании этого файла автоматически создаются таблицы.
 create_tables()
+
+
 def create_changes_log_table():
     conn = get_db_connection()
     cursor = conn.cursor()
