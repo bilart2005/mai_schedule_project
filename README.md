@@ -53,14 +53,14 @@ pip install -r requirements.txt
 │   ├── parser/               # Скрипты парсера (Selenium)
 │   ├── api/                  # REST API на Flask
 │   └── notifier/             # Вспомогательные утилиты
-├── docs
+├── frontend/
+├── docs/
 │   ├── Business Requirements
 │   ├── System Requrinements
 ├── mai_schedule.db           # SQLite база
 ├── requirements.txt          # Зависимости
 ├── .gitignore
-├── README.md                 # Документация проекта
-└── frontend/
+└── README.md                 # Документация проекта
 ```
 📄 Документация
 📘 Бизнес-требования: docs/Business Requirements.docx
