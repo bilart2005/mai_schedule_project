@@ -59,7 +59,8 @@ pip install -r requirements.txt
 ├── mai_schedule.db           # SQLite база
 ├── requirements.txt          # Зависимости
 ├── .gitignore
-└── README.md                 # Документация проекта
+├── README.md                 # Документация проекта
+└── frontend/
 ```
 📄 Документация
 📘 Бизнес-требования: docs/Business Requirements.docx
