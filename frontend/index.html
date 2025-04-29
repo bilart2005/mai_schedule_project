@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Расписание МАИ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://code.jquery.com/ui/1.13.2/themes/base/jquery-ui.css" rel="stylesheet">
+</head>
+<body>
+  <div class="container glass mt-5">
+    <h1 class="text-center mb-4">✈️ Расписание МАИ</h1>
+    <!-- Авторизация -->
+    <div class="mb-3">
+      <h5>🔐 Вход</h5>
+      <div class="row g-2">
+        <div class="col-md-5"><input id="email" class="form-control" placeholder="Email"></div>
+        <div class="col-md-5"><input id="password" type="password" class="form-control" placeholder="Пароль"></div>
+        <div class="col-md-2"><button class="btn btn-primary w-100" onclick="login()">Войти</button></div>
+      </div>
+      <small id="loginStatus" class="text-success"></small>
+    </div>
+    <!-- Фильтр расписания -->
+    <div class="row mb-3">
+      <div class="col-md-4"><input id="groupInput" class="form-control" placeholder="Начните вводить группу..."></div>
+      <div class="col-md-2"><select id="weekInput" class="form-select"><option value="">Неделя</option></select></div>
+      <div class="col-md-2"><button class="btn btn-secondary w-100" onclick="loadSchedule()">Загрузить</button></div>
+      <div class="col-md-2"><button class="btn btn-success w-100" onclick="showAddForm()">Добавить</button></div>
+      <div class="col-md-2"><button class="btn btn-warning w-100" onclick="syncCalendar()">Синхронизировать</button></div>
+    </div>
+    <!-- Таблица расписания -->
+    <table class="table table-bordered table-striped">
+      <thead class="table-info">
+        <tr>
+          <th>День</th>
+          <th>Время</th>
+          <th>✈️ Предмет</th>
+          <th>Преподаватель</th>
+          <th>Аудитория</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="scheduleBody"></tbody>
+    </table>
+    <!-- Форма добавления задания -->
+    <div id="formBlock" class="card p-3 d-none">
+      <h5>➕ Добавить занятие</h5>
+      <div class="row g-2">
+        <div class="col-md-3"><input id="formGroup" class="form-control" placeholder="Группа"></div>
+        <div class="col-md-2"><input id="formWeek" type="number" class="form-control" placeholder="Неделя"></div>
+        <div class="col-md-3"><input id="formDay" type="date" class="form-control"></div>
+        <div class="col-md-2"><input id="formStart" class="form-control" placeholder="Начало (HH:MM)"></div>
+        <div class="col-md-2"><input id="formEnd" class="form-control" placeholder="Конец (HH:MM)"></div>
+        <div class="col-md-4"><input id="formSubject" class="form-control" placeholder="Предмет"></div>
+        <div class="col-md-4"><input id="formTeacher" class="form-control" placeholder="Преподаватель"></div>
+        <div class="col-md-4"><input id="formRoom" class="form-control" placeholder="Аудитория"></div>
+        <div class="col-md-6"><input id="formType" class="form-control" placeholder="Тип (разовое)"></div>
+        <div class="col-md-6"><input id="formPattern" class="form-control" placeholder="Повторяемость"></div>
+        <div class="col-md-12">
+          <button class="btn btn-primary mt-2" onclick="submitForm()">Сохранить</button>
+          <button class="btn btn-secondary mt-2 ms-2" onclick="hideForm()">Отмена</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Скрипты -->
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://code.jquery.com/ui/1.13.2/jquery-ui.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+body {
+  background: url("img/image.png") no-repeat center center fixed;
+  background-size: cover;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 20px;
+  padding: 30px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(6px);
+}
+
+h1 {
+  color: #0277bd;
+  font-weight: bold;
+  text-shadow: 1px 1px 2px rgba(255, 255, 255, 0.7);
+}
+
+.btn-primary, .btn-secondary, .btn-success, .btn-warning {
+  background-color: #29b6f6;
+  border: none;
+  color: white;
+}
+
+.btn-primary:hover, .btn-secondary:hover, .btn-success:hover, .btn-warning:hover {
+  background-color: #0288d1;
+}
+
+.table-info th {
+  background-color: #b3e5fc;
+}
+
+input[type="date"] {
+  height: calc(1.5em + .75rem + 2px);
+  padding: .375rem .75rem;
+  border: 1px solid #ccc;
+  border-radius: .375rem;
+  width: 100%;
+  font-size: 1rem;
+  background: white;
+}
