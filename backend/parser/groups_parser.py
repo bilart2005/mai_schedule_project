@@ -14,7 +14,7 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from database.database import save_groups
+from ..database.database import save_groups
 
 GROUPS_URL = "https://mai.ru/education/studies/schedule/groups.php?department=Институт+№8&course=all"
 CACHE_FILE = "groups_cache.json"
