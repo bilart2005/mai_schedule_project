@@ -8,9 +8,12 @@ from datetime import datetime
 from fake_useragent import UserAgent
 import undetected_chromedriver as uc
 
-from groups_parser import get_cached_groups
+from .groups_parser import get_cached_groups
 
-DB_PATH = "mai_schedule.db"  # или полный путь до вашей БД
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# база лежит в папке parser рядом с этим модулем
+DB_PATH = os.path.join(BASE_DIR, "mai_schedule.db")
 
 
 def get_driver() -> uc.Chrome:
