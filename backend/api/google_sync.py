@@ -3,24 +3,33 @@ import datetime
 import re
 from collections import defaultdict
 import sys
+import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
+PARSER_DB = os.path.abspath(os.path.join(BASE_DIR, "..", "parser", "mai_schedule.db"))
+
 CALENDAR_ID = '****@group.calendar.google.com'
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-SERVICE_ACCOUNT_FILE = 'service_account.json'
 MOSCOW_TZ = datetime.timezone(datetime.timedelta(hours=3))
 
 
 def get_calendar_service():
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        print(f"Файл учетных данных не найден: {SERVICE_ACCOUNT_FILE}")
+        sys.exit(1)
+
     credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    service = build('calendar', 'v3', credentials=credentials)
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+    service = build("calendar", "v3", credentials=credentials)
     return service
 
 
 def ensure_google_event_id_column():
-    conn = sqlite3.connect("mai_schedule.db")
+    conn = sqlite3.connect(PARSER_DB)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(occupied_rooms)")
     columns = [col[1] for col in cursor.fetchall()]
@@ -57,21 +66,21 @@ def parse_date_str(day_str):
 def sync_group_to_calendar(group_name):
     ensure_google_event_id_column()
     service = get_calendar_service()
-    conn = sqlite3.connect("mai_schedule.db")
+    conn = sqlite3.connect(PARSER_DB)
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT rowid, week, day, time, room, subject, teacher, group_name, weekday, google_event_id
-        FROM occupied_rooms
-        WHERE group_name = ?
+            SELECT rowid, week, day, start_time, end_time, room, subject, teacher, group_name, weekday, google_event_id
+            FROM occupied_rooms
+            WHERE group_name = ?
     """, (group_name,))
     rows = cursor.fetchall()
     conn.close()
 
     events_dict = defaultdict(
         lambda: {"rowids": [], "groups": set(), "google_event_id": None, "day_str": None, "time_str": None})
-    for row in rows:
-        rowid, week, day_str, time_str, room, subject, teacher, group_name_db, weekday, google_event_id = row
+    for (rowid, week, day_str, start_t, end_t, room, subject, teacher, group_name_db, weekday, google_event_id) in rows:
+        time_str = f"{start_t} - {end_t}"
         key = (week, day_str, time_str, room, subject, teacher)
         events_dict[key]["rowids"].append(rowid)
         events_dict[key]["groups"].add(group_name_db)
@@ -80,7 +89,7 @@ def sync_group_to_calendar(group_name):
         if google_event_id:
             events_dict[key]["google_event_id"] = google_event_id
 
-    conn = sqlite3.connect("mai_schedule.db")
+    conn = sqlite3.connect(PARSER_DB)
     cursor = conn.cursor()
     for key, data in events_dict.items():
         week, day_str, time_str, room, subject, teacher = key
@@ -150,11 +159,11 @@ def sync_group_to_calendar(group_name):
 def sync_events_in_date_range(start_date, end_date):
     ensure_google_event_id_column()
     service = get_calendar_service()
-    conn = sqlite3.connect("mai_schedule.db")
+    conn = sqlite3.connect(PARSER_DB)
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT rowid, week, day, time, room, subject, teacher, group_name, weekday, google_event_id
+        SELECT rowid, week, day, start_time, end_time, room, subject, teacher, group_name, weekday, google_event_id
         FROM occupied_rooms
     """)
     rows = cursor.fetchall()
@@ -186,7 +195,7 @@ def sync_events_in_date_range(start_date, end_date):
         if google_event_id:
             events_dict[key]["google_event_id"] = google_event_id
 
-    conn = sqlite3.connect("mai_schedule.db")
+    conn = sqlite3.connect(PARSER_DB)
     cursor = conn.cursor()
     for key, data in events_dict.items():
         week, day_str, time_str, room, subject, teacher = key
