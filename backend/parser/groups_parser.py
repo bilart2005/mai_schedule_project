@@ -1,7 +1,7 @@
-import os
 import json
 import time
 import random
+import undetected_chromedriver as uc
 
 from selenium import webdriver
 from selenium.webdriver.edge.service import Service
@@ -9,23 +9,44 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from fake_useragent import UserAgent
+import sys
+import os
 
-from database import save_groups
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from database.database import save_groups
 
 GROUPS_URL = "https://mai.ru/education/studies/schedule/groups.php?department=Институт+№8&course=all"
 CACHE_FILE = "groups_cache.json"
 
 
 def get_driver():
-    ua = UserAgent()
-    options = webdriver.EdgeOptions()
-    options.add_argument(f"user-agent={ua.random}")
-    options.add_argument("--headless")
-    options.add_argument("--disable-blink-features=AutomationControlled")
+    ua = UserAgent().random
+    options = uc.ChromeOptions()
 
-    edge_path = os.getenv("msedgedriver")
-    service = Service(edge_path)
-    return webdriver.Edge(service=service, options=options)
+    # 1) рандомный User-Agent
+    options.add_argument(f"--user-agent={ua}")
+    # 2) headless + evade
+    options.headless = True
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    # 3) прокси из Nekoray (замените порт, если у вас другой)
+    options.add_argument("--proxy-server=socks5://127.0.0.1:2080")
+
+    # 4) явно указать бинарник Chrome
+    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    options.binary_location = chrome_path
+
+    # 5) создаём драйвер
+    driver = uc.Chrome(
+        options=options,
+        browser_executable_path=chrome_path
+    )
+    # 6) на всякий случай явные тайм-аута
+    driver.implicitly_wait(10)
+    return driver
 
 
 def close_popups(driver):
