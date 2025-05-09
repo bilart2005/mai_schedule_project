@@ -1,112 +1,150 @@
+import os
 import sqlite3
 
-# Список кабинетов, доступных для занятий
+# Список кабинетов, которые мы хотим проверять
 ALLOWED_IT_ROOMS = {
     "ГУК Б-416", "ГУК Б-362", "ГУК Б-434", "ГУК Б-436", "ГУК Б-422",
     "ГУК Б-438", "ГУК Б-440", "ГУК Б-417", "ГУК Б-426", "ГУК Б-415",
     "ГУК Б-324", "ГУК Б-325", "ГУК Б-326", "ГУК Б-418", "ГУК Б-420"
 }
 
-# Список кабинетов, которые нельзя занимать
-EXCLUDED_ROOMS = {
-    "ГУК Б-413", "ГУК Б-419", "ГУК Б-421", "ГУК Б-423",
-    "ГУК Б-425", "ГУК Б-432", "ГУК Б-430", "ГУК Б-424"
-}
+# Путь до БД parser/mai_schedule.db (относительно этого скрипта)
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+PARSER_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "parser"))
+DB_PATH    = os.path.join(PARSER_DIR, "mai_schedule.db")
 
 
-def setup_db():
-    """Создаёт таблицы, если их нет"""
-    conn = sqlite3.connect("mai_schedule.db")
-    cursor = conn.cursor()
+def setup_db(conn: sqlite3.Connection):
+    cur = conn.cursor()
 
-    # Проверяем, есть ли колонка `group_name`
-    cursor.execute("PRAGMA table_info(occupied_rooms);")
-    columns = [row[1] for row in cursor.fetchall()]
+    # --- Миграция: если старая таблица без нужных колонок, удаляем её ---
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='occupied_rooms';")
+    if cur.fetchone():
+        cur.execute("PRAGMA table_info(occupied_rooms);")
+        cols = [row[1] for row in cur.fetchall()]
+        # если нет start_time — это старая схема, сносим обе таблицы
+        if "start_time" not in cols:
+            print("🗑 Обнаружена старая схема occupied_rooms, пересоздаём таблицы...")
+            cur.execute("DROP TABLE IF EXISTS occupied_rooms;")
+            cur.execute("DROP TABLE IF EXISTS free_rooms;")
+            conn.commit()
 
-    if "group_name" not in columns:
-        print("🔄 Добавляем колонку group_name в occupied_rooms...")
-        cursor.execute("ALTER TABLE occupied_rooms ADD COLUMN group_name TEXT;")
-
-    cursor.execute("""
+    # --- Создаём таблицы заново с нужной схемой ---
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS occupied_rooms (
-            week INTEGER, 
-            day TEXT, 
-            time TEXT, 
-            room TEXT, 
-            subject TEXT, 
-            teacher TEXT,
-            group_name TEXT
-        )
+            week        INTEGER,
+            day         TEXT,
+            start_time  TEXT,
+            end_time    TEXT,
+            room        TEXT,
+            subject     TEXT,
+            teacher     TEXT,
+            group_name  TEXT,
+            weekday     TEXT,
+            PRIMARY KEY (week, day, start_time, end_time, room)
+        );
     """)
-
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS free_rooms (
-            week INTEGER, 
-            day TEXT, 
-            time TEXT, 
-            room TEXT
-        )
+            week       INTEGER,
+            day        TEXT,
+            start_time TEXT,
+            end_time   TEXT,
+            room       TEXT,
+            PRIMARY KEY (week, day, start_time, end_time, room)
+        );
     """)
-
     conn.commit()
-    conn.close()
 
 
-def get_occupied_rooms():
-    """Получает список занятых IT-кабинетов с группами"""
-    conn = sqlite3.connect("mai_schedule.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT week, day, time, room, subject, teacher, group_name
+def get_occupied_rooms(conn: sqlite3.Connection):
+    """
+    Берём из schedule все записи по ALLOWED_IT_ROOMS,
+    выделяем weekday из day и возвращаем список кортежей:
+    (week, day, start_time, end_time, room, subject, teacher, group_name, weekday)
+    """
+    cur = conn.cursor()
+    placeholders = ",".join("?" for _ in ALLOWED_IT_ROOMS)
+    sql = f"""
+        SELECT week, day, start_time, end_time, room, subject, teacher, group_name
         FROM schedule
-        WHERE room IN ({})
-    """.format(",".join(["?"] * len(ALLOWED_IT_ROOMS))), tuple(ALLOWED_IT_ROOMS))
+        WHERE room IN ({placeholders})
+    """
+    cur.execute(sql, tuple(ALLOWED_IT_ROOMS))
+    rows = cur.fetchall()
 
-    occupied_rooms = cursor.fetchall()
-    conn.close()
+    occupied = []
+    for week, day_str, start, end, room, subj, teacher, grp in rows:
+        weekday = day_str.split(",", 1)[0].strip()
+        occupied.append((week, day_str, start, end, room, subj, teacher, grp, weekday))
+    return occupied
 
-    return occupied_rooms
 
+def get_free_rooms(occupied):
+    """
+    Строим свободные комбинации строго для тех weeks/days/slots,
+    которые реально пришли в occupied.
+    """
+    weeks = sorted({rec[0] for rec in occupied})
+    days  = sorted({rec[1] for rec in occupied})
+    slots = sorted({(rec[2], rec[3]) for rec in occupied})
 
-def get_free_rooms():
-    """Определяет свободные IT-кабинеты"""
-    occupied_rooms = get_occupied_rooms()
-    occupied_set = {(week, day, time, room) for week, day, time, room, _, _, _ in occupied_rooms}
+    occupied_set = {
+        (week, day, start, end, room)
+        for week, day, start, end, room, *_ in occupied
+    }
 
-    free_rooms = []
-    for week in range(1, 18):
-        for day in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб"]:
-            for time in ["09:00 - 10:30", "10:45 - 12:15", "13:00 - 14:30", "14:45 - 16:15"]:
+    free = []
+    for week in weeks:
+        for day in days:
+            for start, end in slots:
                 for room in ALLOWED_IT_ROOMS:
-                    if (week, day, time, room) not in occupied_set:
-                        free_rooms.append((week, day, time, room))
-
-    return free_rooms
+                    key = (week, day, start, end, room)
+                    if key not in occupied_set:
+                        free.append(key)
+    return free
 
 
 def save_filtered_data():
-    """Сохраняет занятые и свободные кабинеты в БД"""
-    setup_db()  # Гарантируем, что таблицы существуют
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        # 1) Миграция + (re)создание таблиц
+        setup_db(conn)
+        cur = conn.cursor()
 
-    conn = sqlite3.connect("mai_schedule.db")
-    cursor = conn.cursor()
+        # 2) Убираем старые данные
+        cur.execute("DELETE FROM occupied_rooms;")
+        cur.execute("DELETE FROM free_rooms;")
 
-    # Очищаем старые данные
-    cursor.execute("DELETE FROM occupied_rooms")
-    cursor.execute("DELETE FROM free_rooms")
+        # 3) Извлекаем занятые и вставляем их
+        occupied = get_occupied_rooms(conn)
+        # дедупликация по (week, day, start, end, room)
+        uniq = {}
+        for rec in occupied:
+            key = rec[:5]
+            if key not in uniq:
+                uniq[key] = rec
+        occ_list = list(uniq.values())
 
-    # Заполняем занятые кабинеты
-    occupied_rooms = get_occupied_rooms()
-    cursor.executemany("INSERT INTO occupied_rooms VALUES (?, ?, ?, ?, ?, ?, ?)", occupied_rooms)
+        cur.executemany(
+            "INSERT OR IGNORE INTO occupied_rooms "
+            "(week, day, start_time, end_time, room, subject, teacher, group_name, weekday) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            occ_list
+        )
 
-    # Заполняем свободные кабинеты
-    free_rooms = get_free_rooms()
-    cursor.executemany("INSERT INTO free_rooms VALUES (?, ?, ?, ?)", free_rooms)
+        # 4) Генерируем свободные и сохраняем их
+        free = get_free_rooms(occ_list)
+        cur.executemany(
+            "INSERT OR IGNORE INTO free_rooms "
+            "(week, day, start_time, end_time, room) VALUES (?, ?, ?, ?, ?);",
+            free
+        )
 
-    conn.commit()
-    conn.close()
-    print("✅ Данные успешно сохранены!")
+        conn.commit()
+        print("✅ occupied_rooms и free_rooms обновлены.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
