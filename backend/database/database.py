@@ -104,5 +104,23 @@ def execute_db(query, args=()):
     return last_id
 
 
+def save_groups(groups):
+    """
+    Сохраняет список словарей с ключом 'name' в таблицу groups.
+    Игнорирует дубли (INSERT OR IGNORE).
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    cur = conn.cursor()
+    # ожидается, что каждый элемент groups — dict {'id': ..., 'name': 'М8О-101А-24'}
+    data = [(g['name'],) for g in groups]
+    cur.executemany(
+        "INSERT OR IGNORE INTO groups(name) VALUES (?)",
+        data
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 # создаём таблицы сразу при импорте
 create_tables()
