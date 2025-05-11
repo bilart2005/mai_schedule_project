@@ -1,162 +1,227 @@
 import argparse
 import sqlite3
-import time
-import random
 import json
-from datetime import datetime
-
+import os
+import random
+import time
+from datetime import datetime, timezone
+from urllib.parse import quote_plus
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+from json import JSONDecodeError
 from fake_useragent import UserAgent
 import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
-from .groups_parser import get_cached_groups
+from backend.database.database import (
+    get_connection, init_db,
+    get_groups_with_id, get_cached_pairs, save_pairs, save_schedule
+)
 
-import os
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# база лежит в папке parser рядом с этим модулем
-DB_PATH = os.path.join(BASE_DIR, "mai_schedule.db")
+# Пути для кеша и логов
+HERE      = os.path.dirname(__file__)
+CACHE_DIR = os.path.join(HERE, "cache")
+LOGS_DIR  = os.path.join(HERE, "logs")
+ERROR_LOG = os.path.join(LOGS_DIR, "errors.json")
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR,  exist_ok=True)
 
 
-def get_driver() -> uc.Chrome:
-    ua = UserAgent().random
-    options = uc.ChromeOptions()
-    options.headless = True
-    options.page_load_strategy = "eager"
-    options.add_argument(f"--user-agent={ua}")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    # Отключаем картинки/стили/шрифты
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.stylesheets": 2,
-        "profile.managed_default_content_settings.fonts": 2,
+def log_error(group: str, week: int, msg: str):
+    entry = {
+        "group": group,
+        "week":  week,
+        "error": msg,
+        "at":    datetime.now(timezone.utc).isoformat()
     }
-    options.add_experimental_option("prefs", prefs)
-    # Прокси Nekoray (socks5 на localhost:2080)
-    options.add_argument("--proxy-server=socks5://127.0.0.1:2080")
-    # Явный путь к Chrome — строка!
-    chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-    options.binary_location = chrome_path
+    try:
+        with open(ERROR_LOG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, JSONDecodeError):
+        data = []
+    data.append(entry)
+    with open(ERROR_LOG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-    driver = uc.Chrome(
-        options=options,
-        browser_executable_path=chrome_path
-    )
-    driver.implicitly_wait(10)
+
+def cache_path(group: str, week: int) -> str:
+    safe = group.replace(" ", "_").replace("/", "_")
+    return os.path.join(CACHE_DIR, f"{safe}_wk{week}.json")
+
+
+def create_driver() -> uc.Chrome:
+    """Конфигурирует и запускает один headless Chrome."""
+    ua   = UserAgent().random
+    opts = uc.ChromeOptions()
+    opts.headless = True
+    opts.add_argument(f"--user-agent={ua}")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    prefs = {
+        "profile.managed_default_content_settings.images":      2,
+        "profile.managed_default_content_settings.stylesheets": 2,
+        "profile.managed_default_content_settings.fonts":       2,
+    }
+    opts.add_experimental_option("prefs", prefs)
+    chrome_bin = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    opts.binary_location = chrome_bin
+    driver = uc.Chrome(options=opts, browser_executable_path=chrome_bin)
+    driver.implicitly_wait(5)
     return driver
 
 
-def init_db(conn: sqlite3.Connection):
-    """Создаёт таблицу parser_pairs, если её ещё нет."""
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS parser_pairs (
-        group_id   INTEGER,
-        week       INTEGER,
-        json_data  TEXT,
-        parsed_at  TEXT,
-        is_custom  INTEGER DEFAULT 0,
-        PRIMARY KEY(group_id, week)
-    );
-    """)
-    conn.commit()
-
-
-def get_cached_pairs(conn: sqlite3.Connection, group_id: int, week: int):
-    cur = conn.execute(
-        "SELECT json_data FROM parser_pairs WHERE group_id=? AND week=?;",
-        (group_id, week)
-    )
-    row = cur.fetchone()
-    return json.loads(row[0]) if row and row[0] else None
-
-
-def save_pairs(conn: sqlite3.Connection, group_id: int, week: int, data):
-    js = json.dumps(data, ensure_ascii=False)
-    now = datetime.utcnow().isoformat()
-    conn.execute("""
-    INSERT INTO parser_pairs(group_id, week, json_data, parsed_at, is_custom)
-    VALUES(?,?,?,?,0)
-    ON CONFLICT(group_id, week) DO UPDATE
-      SET json_data=excluded.json_data,
-          parsed_at=excluded.parsed_at
-    ;
-    """, (group_id, week, js, now))
-    conn.commit()
-
-
-def scrape_pairs(driver: uc.Chrome, group: dict, week: int):
-    """
-    Ваша реальная логика парсинга здесь:
-      1. driver.get(урл для group['id'], week)
-      2. ждем загрузки таблицы
-      3. достаём строки и колонки
-      4. собираем структуру Python-объекта (list/dict)
-      5. возвращаем его
-    """
-    url = f"https://example.com/schedule?group={group['id']}&week={week}"
+def scrape_pairs(driver: uc.Chrome, group: str, week: int) -> list[dict]:
+    base = "https://mai.ru/education/studies/schedule/index.php"
+    url  = f"{base}?group={quote_plus(group)}&week={week}"
     driver.get(url)
-    # TODO: замените на ваши селекторы и сбор данных
-    rows = driver.find_elements_by_css_selector("table.schedule tr")
-    result = []
-    for r in rows[1:]:
-        cols = r.find_elements_by_tag_name("td")
-        lesson = {
-            "time": cols[0].text,
-            "subject": cols[1].text,
-            "room": cols[2].text,
-            "instructor": cols[3].text,
-        }
-        result.append(lesson)
-    return result
+    # если редирект на главную — повторяем
+    if "index.php?group=" not in driver.current_url:
+        driver.get(url)
+
+    wait = WebDriverWait(driver, 10)
+    try:
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.step.mb-5")))
+    except TimeoutException:
+        # считаем, что просто нет расписания на эту неделю
+        return []
+
+    items = driver.find_elements(By.CSS_SELECTOR, "ul.step.mb-5 > li.step-item")
+    if not items:
+        return []
+
+    lessons = []
+    for day in items:
+        date_txt = day.find_element(By.CSS_SELECTOR, ".step-title") \
+                      .text.strip().replace("\u00A0", " ")
+        for blk in day.find_elements(By.CSS_SELECTOR, "div.mb-4"):
+            subj = blk.find_element(By.CSS_SELECTOR, "p.fw-semi-bold.text-dark").text.strip()
+            tm   = blk.find_element(
+                By.CSS_SELECTOR, "ul.list-inline li.list-inline-item"
+            ).text.strip()
+            teachers = [
+                a.text.strip() for a in blk.find_elements(
+                    By.CSS_SELECTOR, "ul.list-inline li.list-inline-item a.text-body"
+                )
+            ]
+            rooms = [
+                li.text.strip() for li in blk.find_elements(
+                    By.CSS_SELECTOR, "ul.list-inline li.list-inline-item"
+                ) if li.find_elements(By.CSS_SELECTOR, "i.fa-map-marker-alt")
+            ]
+            lessons.append({
+                "date":     date_txt,
+                "time":     tm,
+                "subject":  subj,
+                "teachers": teachers,
+                "rooms":    rooms
+            })
+    return lessons
+
+
+def worker(task):
+    """
+    Задача: (group_id, group_name, week, force_db, driver_queue)
+      1) проверяем БД
+      2) читаем из JSON-кеша, если есть
+      3) иначе парсим через Selenium
+      4) сохраняем в кеш и в две таблицы БД
+    """
+    gid, name, week, force_db, driver_queue = task
+    cache_file = cache_path(name, week)
+
+    conn = get_connection()
+    init_db(conn)
+    print(f"[RUN]   {name} wk={week}")
+
+    # 1) если уже есть в БД и не force — пропускаем
+    if not force_db and get_cached_pairs(conn, gid, week):
+        conn.close()
+        print(f"🐁 {name} {week} скип")
+        return (gid, name, week, "skipped", 0)
+
+    # 2) JSON-кеш
+    if os.path.exists(cache_file) and not force_db:
+        with open(cache_file, encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        # 3) парсим
+        driver = driver_queue.get()
+        try:
+            data = scrape_pairs(driver, name, week)
+        except Exception as e:
+            msg = str(e)
+            log_error(name, week, msg)
+            driver_queue.put(driver)
+            conn.close()
+            return (gid, name, week, "error", msg)
+        finally:
+            # независимо от успеха, возвращаем драйвер в очередь
+            driver_queue.put(driver)
+
+        # 4) сохраняем JSON-кеш
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # 5) сохраняем в БД: кеш и расписание
+    save_pairs(conn, gid, week, data)
+    save_schedule(conn, gid, week, data)
+    conn.close()
+    return (gid, name, week, "ok", len(data))
 
 
 def main():
-    p = argparse.ArgumentParser(description="MAI Schedule Parser (Selenium)")
-    p.add_argument("--weeks", required=True, help="Номера недель через запятую, напр. 13,14,15")
-    p.add_argument("--force-groups", action="store_true", help="Принудительно обновить кэш групп")
-    p.add_argument("--force-pairs", action="store_true", help="Перезаписать пары, даже если есть кэш")
+    p = argparse.ArgumentParser(description="MAI Schedule Parser (multi-threaded)")
+    p.add_argument("--weeks",   required=True,
+                   help="Список недель через запятую, напр. 14,15,16")
+    p.add_argument("--force-db", action="store_true",
+                   help="Перезаписать пары в БД и JSON-кеше")
+    p.add_argument("--threads", type=int, default=5,
+                   help="Число параллельных потоков (по умолчанию 5)")
     args = p.parse_args()
 
-    # парсим номера недель
-    try:
-        weeks = [int(w.strip()) for w in args.weeks.split(",")]
-    except ValueError:
-        print("Ошибка: --weeks должен быть списком чисел через запятую.")
-        return
-
-    # получаем группы
-    groups = get_cached_groups(force=args.force_groups)
+    weeks  = [int(w) for w in args.weeks.split(",")]
+    groups = get_groups_with_id()
     if not groups:
-        print("Не найдено ни одной группы.")
+        print("Не найдены группы в БД, сначала запустите groups_parser.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    # 1) создаём пул драйверов
+    driver_queue = Queue(maxsize=args.threads)
+    for _ in range(args.threads):
+        drv = create_driver()
+        driver_queue.put(drv)
 
-    driver = get_driver()
-    try:
-        for grp in groups:
-            gid = grp["id"]
-            name = grp.get("name", str(gid))
-            for wk in weeks:
-                if not args.force_pairs and get_cached_pairs(conn, gid, wk):
-                    print(f"[SKIP] {name} wk={wk} (cached)")
-                    continue
+    # 2) собираем задачи
+    tasks = [
+        (g["id"], g["name"], wk, args.force_db, driver_queue)
+        for g in groups for wk in weeks
+    ]
+    random.shuffle(tasks)
 
-                print(f"[RUN ] {name} wk={wk}")
-                try:
-                    data = scrape_pairs(driver, grp, wk)
-                except Exception as e:
-                    print(f"  ❌ Ошибка парсинга: {e}")
-                    continue
+    print(f"▶️ Запускаем парсер: {len(tasks)} задач × {args.threads} потоков…")
+    with ThreadPoolExecutor(max_workers=args.threads) as exe:
+        futures = {exe.submit(worker, t): t for t in tasks}
+        for fut in as_completed(futures):
+            gid, name, wk, status, info = fut.result()
+            if status == "ok":
+                print(f"[ OK ]   {name} wk={wk} → {info} пар")
+            elif status == "skipped":
+                print(f"[SKIP]   {name} wk={wk} (есть в БД)")
+            else:
+                print(f"[FAIL]   {name} wk={wk}: {info}")
 
-                save_pairs(conn, gid, wk, data)
-                # небольшая случайная задержка
-                time.sleep(random.uniform(1.0, 2.5))
+    print("✅ Все задачи завершены, закрываем браузеры…")
+    # 3) чисто завершаем все драйверы
+    while not driver_queue.empty():
+        drv = driver_queue.get_nowait()
+        try:
+            drv.quit()
+        except:
+            pass
 
-    finally:
-        driver.quit()
-        conn.close()
+    print("✅ Готово.")
 
 
 if __name__ == "__main__":
