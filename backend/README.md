@@ -70,7 +70,7 @@
 
 ## Модуль API
 
-Путь: `backend/api/app.py`
+Путь: `backend/api/routes.py`
 
 * **Авторизация**
   Простая JWT-подобная: в заголовке `Authorization: Bearer <json>` передаются `{ "user_id": ..., "role": ... }`.
@@ -106,7 +106,7 @@
    cd backend/api
    ```
    ```
-   python api
+   python routes
    ```
 
 ---
