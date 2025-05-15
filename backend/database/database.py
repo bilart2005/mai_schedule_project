@@ -96,6 +96,74 @@ def get_cached_pairs(conn: sqlite3.Connection, group_id: int, week: int):
     return json.loads(row[0]) if row and row[0] else None
 
 
+def create_app_tables(conn: sqlite3.Connection):
+    """Создаёт таблицы users, schedule, occupied_rooms, free_rooms и changes_log."""
+    cur = conn.cursor()
+    # Таблица пользователей
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        email    TEXT    UNIQUE NOT NULL,
+        password TEXT    NOT NULL,
+        role     TEXT    NOT NULL
+    );
+    """)
+    # Расписание
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS schedule (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name         TEXT    NOT NULL,
+        week               INTEGER NOT NULL,
+        day                TEXT    NOT NULL,
+        start_time         TEXT    NOT NULL,
+        end_time           TEXT    NOT NULL,
+        subject            TEXT    NOT NULL,
+        teacher            TEXT,
+        room               TEXT,
+        event_type         TEXT,
+        recurrence_pattern TEXT,
+        is_custom          INTEGER DEFAULT 0
+    );
+    """)
+    # Занятые аудитории
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS occupied_rooms (
+        week       INTEGER,
+        day        TEXT,
+        start_time TEXT,
+        end_time   TEXT,
+        room       TEXT,
+        subject    TEXT,
+        teacher    TEXT,
+        group_name TEXT,
+        PRIMARY KEY (week, day, start_time, end_time, room)
+    );
+    """)
+    # Свободные аудитории
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS free_rooms (
+        week       INTEGER,
+        day        TEXT,
+        start_time TEXT,
+        end_time   TEXT,
+        room       TEXT,
+        PRIMARY KEY (week, day, start_time, end_time, room)
+    );
+    """)
+    # Лог изменений
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS changes_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id INTEGER,
+        changed_at  TEXT    NOT NULL,
+        old_data    TEXT,
+        new_data    TEXT,
+        FOREIGN KEY(schedule_id) REFERENCES schedule(id) ON DELETE CASCADE
+    );
+    """)
+    conn.commit()
+
+
 def save_pairs(conn: sqlite3.Connection, group_id: int, week: int, data: list[dict]):
     js = json.dumps(data, ensure_ascii=False)
     ts = datetime.now(timezone.utc).isoformat()
@@ -117,7 +185,7 @@ def save_schedule(conn: sqlite3.Connection, group_id: int, week: int, data: list
     cur = conn.cursor()
     for lesson in data:
         teachers_json = json.dumps(lesson["teachers"], ensure_ascii=False)
-        rooms_json    = json.dumps(lesson["rooms"], ensure_ascii=False)
+        rooms_json = json.dumps(lesson["rooms"], ensure_ascii=False)
         cur.execute("""
         INSERT INTO schedule (
             group_id, week, date, time, subject, teachers, rooms
