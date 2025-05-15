@@ -1,12 +1,14 @@
 import os
 import sys
 import datetime
+import sqlite3
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from backend.database.database import DB_PATH
 
 # Замените на ваш Calendar ID
-CALENDAR_ID = '<тут длинные код рандомных бук и цифр, взятый из календаря>@group.calendar.google.com'
+CALENDAR_ID = 'be410167da6282a13f52aad85d4ab444e8b456ecaf5da50495e0b782b566426f@group.calendar.google.com'
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 # Путь до service account JSON (правильное название файла)
@@ -18,19 +20,23 @@ MOSCOW_TZ = datetime.timezone(datetime.timedelta(hours=3))
 
 
 def get_calendar_service():
-    """
-    Создает и возвращает объект сервиса Google Calendar,
-    используя данные сервисного аккаунта.
-    """
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        print(f"Файл учетных данных не найден: {SERVICE_ACCOUNT_FILE}")
-        sys.exit(1)
-
-    credentials = service_account.Credentials.from_service_account_file(
+    creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
-    service = build('calendar', 'v3', credentials=credentials)
-    return service
+    return build("calendar", "v3", credentials=creds)
+
+
+def delete_all_events_for_group(group_name):
+    # пример работы с БД
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT google_event_id FROM occupied_rooms WHERE group_name = ?", (group_name,))
+    ids = [r[0] for r in cur.fetchall() if r[0]]
+    conn.close()
+
+    service = get_calendar_service()
+    for eid in ids:
+        service.events().delete(calendarId=CALENDAR_ID, eventId=eid).execute()
 
 
 from googleapiclient.errors import HttpError
