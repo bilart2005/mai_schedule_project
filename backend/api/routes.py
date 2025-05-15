@@ -1,18 +1,56 @@
 import sqlite3
-import os
 import json
-import datetime
 from functools import wraps
+from datetime import datetime
 from flask import Flask, request, jsonify, g
+from flask_cors import CORS
+from backend.database.database import (
+    DB_PATH,
+    init_db,  # создаёт parser_pairs + groups
+    create_app_tables  # создаёт users, schedule, occupied_rooms, free_rooms, changes_log
+)
+from backend.api.google_sync import (
+    sync_group_to_calendar,
+    sync_events_in_date_range
+)
 
-# Импорты вашей БД и синка
-from database import create_tables, query_db, execute_db
-from api.google_sync import sync_group_to_calendar, sync_events_in_date_range
+app = Flask(__name__, static_folder='static', template_folder='templates')
+CORS(app)
 
-app = Flask(__name__)
+# ——— Инициализация БД ———
+# 1) парсер-таблицы (init_db)
+# 2) таблицы приложения (create_app_tables)
+conn = sqlite3.connect(DB_PATH, timeout=5)
+init_db(conn)
+create_app_tables(conn)
+conn.close()
 
-# Убедимся, что все таблицы есть (работаем с той же БД parser/mai_schedule.db)
-create_tables()
+
+# ——— Утилиты для работы с БД ———
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def query_db(query: str, args=(), one: bool = False):
+    conn = get_db_connection()
+    cur = conn.execute(query, args)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows[0] if one and rows else rows
+
+
+def execute_db(query: str, args=()):
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    cur = conn.cursor()
+    cur.execute(query, args)
+    conn.commit()
+    last_id = cur.lastrowid
+    cur.close()
+    conn.close()
+    return last_id
 
 
 # ——— Простейшая «JWT» авторизация с JSON-токеном ——— #
@@ -44,34 +82,26 @@ def get_jwt_identity():
 @app.route("/register", methods=["POST"])
 def register_user():
     data = request.get_json(force=True)
-    email = data["email"]
-    password = data["password"]
-    role = data.get("role", "student")
     try:
         execute_db(
             "INSERT INTO users (email, password, role) VALUES (?, ?, ?)",
-            (email, password, role)
-            )
+            (data["email"], data["password"], data.get("role", "student"))
+        )
     except sqlite3.IntegrityError:
         return jsonify({"msg": "Пользователь с таким email уже существует"}), 409
-
     return jsonify({"msg": "Пользователь зарегистрирован"}), 201
 
 
 @app.route("/login", methods=["POST"])
 def login_user():
     data = request.get_json(force=True)
-    email = data["email"]
-    password = data["password"]
-    user = query_db(
+    row = query_db(
         "SELECT id, password, role FROM users WHERE email = ?",
-        (email,), one=True
+        (data["email"],), one=True
     )
-    if not user or user[1] != password:
+    if not row or row["password"] != data["password"]:
         return jsonify({"msg": "Неверный логин или пароль"}), 401
-    user_id, _, role = user
-    # наш «токен» — просто JSON-строка с id и ролью
-    token = json.dumps({"user_id": user_id, "role": role})
+    token = json.dumps({"user_id": row["id"], "role": row["role"]})
     return jsonify(access_token=token), 200
 
 
@@ -79,7 +109,7 @@ def login_user():
 @app.route("/groups", methods=["GET"])
 def get_groups():
     rows = query_db("SELECT name FROM groups")
-    return jsonify([r[0] for r in rows]), 200
+    return jsonify([r["name"] for r in rows]), 200
 
 
 # ——— Расписание ——— #
@@ -92,30 +122,41 @@ def get_schedule():
 
     rows = query_db(
         """
-        SELECT id, day, start_time, end_time,
-               subject, teacher, room,
-               event_type, recurrence_pattern, is_custom
-        FROM schedule
-        WHERE group_name = ? AND week = ?
+        SELECT s.id,
+            s.date    AS date,
+            s.time    AS time,
+            s.subject,
+            s.teachers,
+            s.rooms,
+            s.is_custom
+        FROM schedule s
+        JOIN groups  g ON s.group_id = g.id
+        WHERE g.name = ? AND s.week = ?
         """,
         (group, week)
     )
-    schedule = [
-        {
-            "id": r[0],
-            "day": r[1],
-            "start_time": r[2],
-            "end_time": r[3],
-            "subject": r[4],
-            "teacher": r[5] or "Не указан",
-            "room": r[6] or "Не указана",
-            "event_type": r[7],
-            "recurrence_pattern": r[8],
-            "is_custom": bool(r[9])
-        }
-        for r in rows
-    ]
-    return jsonify(schedule), 200
+    result = []
+
+    for r in rows:
+        # teachers и rooms хранятся как JSON-строки
+        try:
+            teachers = json.loads(r["teachers"])
+        except:
+            teachers = []
+        try:
+            rooms = json.loads(r["rooms"])
+        except:
+            rooms = []
+        result.append({
+            "id": r["id"],
+            "date": r["date"],
+            "time": r["time"],
+            "subject": r["subject"],
+            "teachers": teachers,
+            "rooms": rooms,
+            "is_custom": bool(r["is_custom"])
+        })
+    return jsonify(result), 200
 
 
 @app.route("/schedule", methods=["POST"])
@@ -126,26 +167,33 @@ def add_schedule():
         return jsonify({"msg": "Недостаточно прав"}), 403
 
     data = request.get_json(force=True)
+    # Находим ID группы
+    grp = query_db("SELECT id FROM groups WHERE name = ?", (data["group_name"],), one=True)
+    if not grp:
+        return jsonify({"error": "Группа не найдена"}), 404
+    group_id = grp["id"]
+
+    # Собираем JSON-поля
+    teachers_json = json.dumps(data.get("teachers", []))
+    rooms_json = json.dumps(data.get("rooms", []))
+
     execute_db(
         """
         INSERT INTO schedule
-          (group_name, week, day, start_time, end_time,
-           subject, teacher, room, event_type, recurrence_pattern, is_custom)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            (group_id, week, date, time, subject, teachers, rooms, is_custom)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
         """,
         (
-            data.get("group_name", ""),
+            group_id,
             data["week"],
-            data["day"],
-            data["start_time"],
-            data["end_time"],
+            data["date"],
+            data["time"],
             data["subject"],
-            data.get("teacher", "Не указан"),
-            data.get("room", "Не указана"),
-            data.get("event_type", "разовое"),
-            data.get("recurrence_pattern", "")
+            teachers_json,
+            rooms_json
         )
     )
+
     return jsonify({"msg": "Занятие добавлено"}), 201
 
 
@@ -158,34 +206,31 @@ def occupied_rooms():
     )
     return jsonify([
         {
-            "week": r[0],
-            "day": r[1],
-            "start_time": r[2],
-            "end_time": r[3],
-            "room": r[4],
-            "subject": r[5],
-            "teacher": r[6],
-            "group": r[7],
-        }
-        for r in rows
+            "week": r["week"],
+            "day": r["day"],
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "room": r["room"],
+            "subject": r["subject"],
+            "teacher": r["teacher"],
+            "group": r["group_name"],
+        } for r in rows
     ]), 200
 
 
 @app.route("/free_rooms", methods=["GET"])
 def free_rooms():
     rows = query_db(
-        "SELECT week, day, start_time, end_time, room "
-        "FROM free_rooms"
+        "SELECT week, day, start_time, end_time, room FROM free_rooms"
     )
     return jsonify([
         {
-            "week": r[0],
-            "day": r[1],
-            "start_time": r[2],
-            "end_time": r[3],
-            "room": r[4],
-        }
-        for r in rows
+            "week": r["week"],
+            "day": r["day"],
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "room": r["room"],
+        } for r in rows
     ]), 200
 
 
@@ -194,32 +239,30 @@ def free_rooms():
 @jwt_required()
 def sync_group_calendar():
     data = request.get_json(force=True)
-    group = data.get("group")
-    if not group:
+    if not data.get("group"):
         return jsonify({"error": "Укажите группу"}), 400
-    sync_group_to_calendar(group)
-    return jsonify({"msg": f"Расписание группы {group} добавлено в Google Calendar"}), 200
+    sync_group_to_calendar(data["group"])
+    return jsonify({"msg": f"Расписание группы {data['group']} добавлено в Google Calendar"}), 200
 
 
 @app.route("/calendar/sync_range", methods=["POST"])
 def sync_range_calendar():
     data = request.get_json(force=True)
-    start_str = data.get("start_date")
-    end_str = data.get("end_date")
-    if not start_str or not end_str:
+    sd = data.get("start_date")
+    ed = data.get("end_date")
+    if not sd or not ed:
         return jsonify({"error": "Введите start_date и end_date"}), 400
     try:
-        sd = datetime.datetime.strptime(start_str, "%d.%m.%Y").date()
-        ed = datetime.datetime.strptime(end_str, "%d.%m.%Y").date()
-    except Exception as e:
+        sd_dt = datetime.strptime(sd, "%d.%m.%Y").date()
+        ed_dt = datetime.strptime(ed, "%d.%m.%Y").date()
+    except ValueError as e:
         return jsonify({"error": f"Неверный формат даты: {e}"}), 400
-    if ed < sd:
+    if ed_dt < sd_dt:
         return jsonify({"error": "Дата окончания раньше даты начала"}), 400
-    sync_events_in_date_range(sd, ed)
-    return jsonify({"msg": f"Синхронизированы события с {sd} по {ed}"}), 200
+    sync_events_in_date_range(sd_dt, ed_dt)
+    return jsonify({"msg": f"Синхронизированы события с {sd_dt} по {ed_dt}"}), 200
 
 
 if __name__ == "__main__":
-    # Отключаем отладчик и релоад, чтобы не блокировать SQLite
+    # Чтобы SQLite не блокироваться
     app.run(debug=False, use_reloader=False, port=5000)
-
