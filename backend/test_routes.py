@@ -1,5 +1,3 @@
-# backend/test_routes.py
-
 import os
 import sys
 
