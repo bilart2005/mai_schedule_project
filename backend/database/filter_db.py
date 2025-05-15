@@ -1,37 +1,25 @@
-import os
 import sqlite3
+import json
+import re
+from backend.database.database import DB_PATH
 
-# Список кабинетов, которые мы хотим проверять
+# <-- Ваш список «IT»-аудиторий, которые нужно учитывать
 ALLOWED_IT_ROOMS = {
     "ГУК Б-416", "ГУК Б-362", "ГУК Б-434", "ГУК Б-436", "ГУК Б-422",
     "ГУК Б-438", "ГУК Б-440", "ГУК Б-417", "ГУК Б-426", "ГУК Б-415",
     "ГУК Б-324", "ГУК Б-325", "ГУК Б-326", "ГУК Б-418", "ГУК Б-420"
 }
 
-# Путь до БД parser/mai_schedule.db (относительно этого скрипта)
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-PARSER_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "parser"))
-DB_PATH    = os.path.join(PARSER_DIR, "mai_schedule.db")
-
 
 def setup_db(conn: sqlite3.Connection):
+    """Создаёт (пересоздаёт) occupied_rooms и free_rooms."""
     cur = conn.cursor()
-
-    # --- Миграция: если старая таблица без нужных колонок, удаляем её ---
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='occupied_rooms';")
-    if cur.fetchone():
-        cur.execute("PRAGMA table_info(occupied_rooms);")
-        cols = [row[1] for row in cur.fetchall()]
-        # если нет start_time — это старая схема, сносим обе таблицы
-        if "start_time" not in cols:
-            print("🗑 Обнаружена старая схема occupied_rooms, пересоздаём таблицы...")
-            cur.execute("DROP TABLE IF EXISTS occupied_rooms;")
-            cur.execute("DROP TABLE IF EXISTS free_rooms;")
-            conn.commit()
-
-    # --- Создаём таблицы заново с нужной схемой ---
+    # сброс старых
+    cur.execute("DROP TABLE IF EXISTS occupied_rooms;")
+    cur.execute("DROP TABLE IF EXISTS free_rooms;")
+    # новая схема
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS occupied_rooms (
+        CREATE TABLE occupied_rooms (
             week        INTEGER,
             day         TEXT,
             start_time  TEXT,
@@ -45,7 +33,7 @@ def setup_db(conn: sqlite3.Connection):
         );
     """)
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS free_rooms (
+        CREATE TABLE free_rooms (
             week       INTEGER,
             day        TEXT,
             start_time TEXT,
@@ -59,84 +47,123 @@ def setup_db(conn: sqlite3.Connection):
 
 def get_occupied_rooms(conn: sqlite3.Connection):
     """
-    Берём из schedule все записи по ALLOWED_IT_ROOMS,
-    выделяем weekday из day и возвращаем список кортежей:
-    (week, day, start_time, end_time, room, subject, teacher, group_name, weekday)
+    Из парсерной таблицы schedule с JOIN по groups берёт все уроки,
+    парсит JSON-поля, фильтрует по ALLOWED_IT_ROOMS и возвращает
+    список кортежей
+    (week, date, start_time, end_time, room, subject, teacher, group_name, weekday).
     """
     cur = conn.cursor()
-    placeholders = ",".join("?" for _ in ALLOWED_IT_ROOMS)
-    sql = f"""
-        SELECT week, day, start_time, end_time, room, subject, teacher, group_name
-        FROM schedule
-        WHERE room IN ({placeholders})
-    """
-    cur.execute(sql, tuple(ALLOWED_IT_ROOMS))
+    cur.execute("""
+        SELECT s.week,
+               s.date,
+               s.time,
+               s.subject,
+               s.teachers,
+               s.rooms,
+               g.name AS group_name
+        FROM schedule s
+        JOIN groups  g ON s.group_id = g.id
+    """)
     rows = cur.fetchall()
+    print(f"[FILTER_DB] Прочитано строк из schedule: {len(rows)}")
 
     occupied = []
-    for week, day_str, start, end, room, subj, teacher, grp in rows:
-        weekday = day_str.split(",", 1)[0].strip()
-        occupied.append((week, day_str, start, end, room, subj, teacher, grp, weekday))
+    for week, date_str, time_str, subject, teachers_json, rooms_json, group_name in rows:
+        # преподаватели
+        try:
+            teachers = json.loads(teachers_json)
+        except:
+            teachers = []
+        teacher = ", ".join(teachers)
+
+        # нормализуем дефисы и разбиваем время
+        clean_time = re.sub(r"[–—]", "-", time_str)
+        parts = [p.strip() for p in clean_time.split("-")]
+        if len(parts) != 2:
+            continue
+        start_time, end_time = parts
+
+        # аудитории
+        try:
+            rooms = json.loads(rooms_json)
+        except:
+            rooms = []
+
+        # день недели (до запятой)
+        weekday = date_str.split(",", 1)[0].strip()
+
+        # оставляем только нужные аудитории
+        for room in rooms:
+            if room in ALLOWED_IT_ROOMS:
+                occupied.append((
+                    week,
+                    date_str,
+                    start_time,
+                    end_time,
+                    room,
+                    subject,
+                    teacher,
+                    group_name,
+                    weekday
+                ))
+
+    print(f"[FILTER_DB] Сгенерировано occupied-записей: {len(occupied)}")
     return occupied
 
 
 def get_free_rooms(occupied):
     """
-    Строим свободные комбинации строго для тех weeks/days/slots,
-    которые реально пришли в occupied.
+    На основе списка occupied генерирует все свободные слоты
+    по тем же неделям/дням/временным слотам и по тем же кабинетам.
     """
     weeks = sorted({rec[0] for rec in occupied})
-    days  = sorted({rec[1] for rec in occupied})
+    days = sorted({rec[1] for rec in occupied})
     slots = sorted({(rec[2], rec[3]) for rec in occupied})
-
-    occupied_set = {
-        (week, day, start, end, room)
-        for week, day, start, end, room, *_ in occupied
-    }
+    rooms_all = sorted({rec[4] for rec in occupied})
+    occupied_set = {(w, d, s, e, r) for w, d, s, e, r, *_ in occupied}
 
     free = []
-    for week in weeks:
-        for day in days:
-            for start, end in slots:
-                for room in ALLOWED_IT_ROOMS:
-                    key = (week, day, start, end, room)
+    for w in weeks:
+        for d in days:
+            for s, e in slots:
+                for r in rooms_all:
+                    key = (w, d, s, e, r)
                     if key not in occupied_set:
                         free.append(key)
+    print(f"[FILTER_DB] Сгенерировано free-записей: {len(free)}")
     return free
 
 
 def save_filtered_data():
+    """
+    Сбрасывает и пересоздаёт таблицы, заполняет их occupied и free.
+    """
     conn = sqlite3.connect(DB_PATH)
     try:
-        # 1) Миграция + (re)создание таблиц
         setup_db(conn)
         cur = conn.cursor()
 
-        # 2) Убираем старые данные
-        cur.execute("DELETE FROM occupied_rooms;")
-        cur.execute("DELETE FROM free_rooms;")
-
-        # 3) Извлекаем занятые и вставляем их
+        # получаем occupied + дедупликация
         occupied = get_occupied_rooms(conn)
-        # дедупликация по (week, day, start, end, room)
-        uniq = {}
+        unique = {}
         for rec in occupied:
             key = rec[:5]
-            if key not in uniq:
-                uniq[key] = rec
-        occ_list = list(uniq.values())
+            if key not in unique:
+                unique[key] = rec
+        occ_list = list(unique.values())
 
+        # вставляем занятые
         cur.executemany(
-            "INSERT OR IGNORE INTO occupied_rooms "
+            "INSERT INTO occupied_rooms "
             "(week, day, start_time, end_time, room, subject, teacher, group_name, weekday) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
             occ_list
         )
 
-        # 4) Генерируем свободные и сохраняем их
+        # генерируем и вставляем свободные
         free = get_free_rooms(occ_list)
         cur.executemany(
-            "INSERT OR IGNORE INTO free_rooms "
+            "INSERT INTO free_rooms "
             "(week, day, start_time, end_time, room) VALUES (?, ?, ?, ?, ?);",
             free
         )
