@@ -21,7 +21,7 @@ def setup_db(conn: sqlite3.Connection):
     # Новая схема для occupied_rooms
     cur.execute("""
         CREATE TABLE occupied_rooms (
-            schedule_id INTEGER,              -- 👈 добавлено поле
+            schedule_id INTEGER,        
             week        INTEGER,
             day         TEXT,
             start_time  TEXT,
@@ -48,7 +48,6 @@ def setup_db(conn: sqlite3.Connection):
     """)
 
     conn.commit()
-
 
 
 def get_occupied_rooms(conn: sqlite3.Connection):
@@ -114,7 +113,6 @@ def get_occupied_rooms(conn: sqlite3.Connection):
                     group_name,
                     weekday
                 ))
-
 
     print(f"[FILTER_DB] Сгенерировано occupied-записей: {len(occupied)}")
     return occupied
